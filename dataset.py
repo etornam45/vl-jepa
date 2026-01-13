@@ -3,7 +3,6 @@ from datasets import load_dataset
 import torch
 from torch.utils.data import Dataset
 from torchvision.io import read_video
-import random
 
 
 def get_frames(video_path, num_frames=8):
@@ -45,7 +44,7 @@ class MSRVTTDataset(Dataset):
         else:
             sample_idx = idx // self.captions_per_video
 
-        cap_idx = idx % self.captions_per_video
+        # cap_idx = idx % self.captions_per_video
 
         example = self.hf_dataset[sample_idx]
         video_path = os.path.join(self.video_root, example["video"])
