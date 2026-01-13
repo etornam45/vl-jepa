@@ -4,6 +4,9 @@ from dataset import MSRVTTDataset, collate_fn
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from transformers.utils import logging
+logging.set_verbosity_error()
+
 
 train_ds = MSRVTTDataset(
     hf_dataset = load_dataset('friedrichor/MSR-VTT', 'train_9k')['train'],
@@ -27,7 +30,7 @@ print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
-loader = DataLoader(train_ds, batch_size=15, collate_fn=collate_fn)
+loader = DataLoader(train_ds, batch_size=32, collate_fn=collate_fn)
 
 
 
