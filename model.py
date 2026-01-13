@@ -1,12 +1,16 @@
 import torch
 import torch.nn as nn
-from transformers import AutoModel, AutoTokenizer, GemmaModel
+from transformers import AutoModel, AutoTokenizer
 import torch.nn.functional as F
+
 
 class TextEmbedder(nn.Module):
     def __init__(self, model_name="google/gemma-3-270m-it"):
         super().__init__()
-        temp_model = GemmaModel.from_pretrained(model_name)
+        temp_model = AutoModel.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+        )
         self.embed_tokens = temp_model.embed_tokens
         self.vocab_size = temp_model.config.vocab_size
         self.hidden_size = temp_model.config.hidden_size
@@ -19,7 +23,10 @@ class TextEmbedder(nn.Module):
 class Predictor(nn.Module):
     def __init__(self, model_name="google/gemma-3-270m-it", num_layers=4):
         super().__init__()
-        self.model = GemmaModel.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+        )
         self.model.layers = nn.ModuleList(self.model.layers[-num_layers:])
         self.partial_freeze()
 
@@ -56,7 +63,9 @@ class Predictor(nn.Module):
         )  # [B, 3 + N_visual, D]
 
         if pos_embed is not None:
-            input_embeddings = input_embeddings + pos_embed[:, : input_embeddings.shape[1], :]
+            input_embeddings = (
+                input_embeddings + pos_embed[:, : input_embeddings.shape[1], :]
+            )
 
         outputs = self.model(
             inputs_embeds=input_embeddings,
@@ -71,11 +80,13 @@ class Predictor(nn.Module):
 
         return outputs.last_hidden_state
 
+
 class InfoNCELoss(nn.Module):
     """
     InfoNCE (NT-Xent) loss for contrastive learning
     NOTE: I did not implement this function by myself it may be wrong.
     """
+
     def __init__(self, temperature=0.07, learnable_temperature=True):
         super().__init__()
         if learnable_temperature:
@@ -83,42 +94,46 @@ class InfoNCELoss(nn.Module):
         else:
             self.temperature = temperature
         self.cross_entropy = nn.CrossEntropyLoss()
-        
+
     def forward(self, z_i, z_j):
         """
         Compute InfoNCE loss between two sets of embeddings
         z_i: [B, D] - anchor embeddings (predicted)
         z_j: [B, D] - positive embeddings (target)
-        
+
         Returns: scalar loss
         """
         batch_size = z_i.shape[0]
-        
+
         # Normalize embeddings
         z_i_norm = F.normalize(z_i, dim=-1)
         z_j_norm = F.normalize(z_j, dim=-1)
-        
+
         # Compute similarity matrix
         # [B, D] @ [D, B] = [B, B]
         sim_matrix = torch.matmul(z_i_norm, z_j_norm.T)  # [B, B]
-        
+
         # Scale by temperature
-        temperature = self.temperature if isinstance(self.temperature, float) else self.temperature.clamp(min=1e-8)
+        temperature = (
+            self.temperature
+            if isinstance(self.temperature, float)
+            else self.temperature.clamp(min=1e-8)
+        )
         sim_matrix = sim_matrix / temperature
-        
+
         # Labels are the diagonal (positive pairs)
         labels = torch.arange(batch_size, device=z_i.device)
-        
+
         # Compute cross-entropy loss
         loss = self.cross_entropy(sim_matrix, labels)
-        
+
         # Compute accuracy (optional)
         with torch.no_grad():
             preds = torch.argmax(sim_matrix, dim=1)
             accuracy = (preds == labels).float().mean()
-        
+
         return loss, accuracy
-   
+
 
 class VL_JEPA(nn.Module):
     def __init__(
@@ -151,8 +166,9 @@ class VL_JEPA(nn.Module):
 
         self.query_tokenizer = AutoTokenizer.from_pretrained("google/gemma-3-270m-it")
         if self.query_tokenizer.pad_token is None:
-            self.query_tokenizer.pad_token = self.query_tokenizer.eos_token # ADD PAD TOKEN
-
+            self.query_tokenizer.pad_token = (
+                self.query_tokenizer.eos_token
+            )  # ADD PAD TOKEN
 
         self.text_proj = nn.Sequential(
             nn.Linear(text_dim, predictor_dim), nn.GELU(), nn.LayerNorm(predictor_dim)
@@ -166,8 +182,7 @@ class VL_JEPA(nn.Module):
         self.pos_embed = nn.Parameter(torch.randn(1, max_seq_len, predictor_dim))
 
         self.loss_fn = InfoNCELoss(
-            temperature=temperature,
-            learnable_temperature=learnable_temperature
+            temperature=temperature, learnable_temperature=learnable_temperature
         )
 
     def freeze_model(self, model):
@@ -175,8 +190,7 @@ class VL_JEPA(nn.Module):
             param.requires_grad = False
 
     def embed_query(self, xq):
-        """Embed query text using TextEmbedder.
-        """
+        """Embed query text using TextEmbedder."""
         tokenized = self.query_tokenizer(
             xq,
             padding="longest",
@@ -188,10 +202,9 @@ class VL_JEPA(nn.Module):
         sq = self.query_embedder(input_ids)
         sq = sq.to(self.pos_embed.device)
         return sq
-    
+
     def encode_target(self, y):
-        """Encode target text using y_encoder.
-        """
+        """Encode target text using y_encoder."""
         tokenized = self.query_tokenizer(
             y,
             padding="longest",
@@ -203,8 +216,7 @@ class VL_JEPA(nn.Module):
         attention_mask = tokenized.attention_mask.to(self.pos_embed.device)
         with torch.no_grad():
             sy = self.y_encoder(
-                input_ids,
-                attention_mask=attention_mask
+                input_ids, attention_mask=attention_mask
             ).last_hidden_state
         return sy
 
@@ -217,8 +229,6 @@ class VL_JEPA(nn.Module):
             sv = sv.mean(dim=1)  # Global average pooling over sequence dimension
             sv = sv.view(B, N, -1)  # [B, N, D_v]
         return sv
-
-
 
     def forward(self, xv, xq, y):
         """
@@ -240,12 +250,8 @@ class VL_JEPA(nn.Module):
         sp_pooled = sp.mean(dim=1)  # [B, D_p]
         sy_pooled = sy.mean(dim=1)  # [B, D_p]
 
-        loss, accuracy = self.loss_fn(
-            z_i=sp_pooled,
-            z_j=sy_pooled
-        )
+        loss, accuracy = self.loss_fn(z_i=sp_pooled, z_j=sy_pooled)
         return loss, accuracy
-
 
     def predict(self, xv, xq):
         sv = self.embed_visual(xv)  # [B, N, D_v]
@@ -254,6 +260,7 @@ class VL_JEPA(nn.Module):
 
         sp = self.predictor(sq, sv, pos_embed=self.pos_embed)  # [B, S_q + N + 2, D_p]
         return sp
+
 
 if __name__ == "__main__":
     model = VL_JEPA()
@@ -273,4 +280,3 @@ if __name__ == "__main__":
     loss, accuracy = model(xv, xq, y)
     print("Loss:", loss.item())
     print("Accuracy:", accuracy.item())
-    
