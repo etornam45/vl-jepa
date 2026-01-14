@@ -5,7 +5,7 @@
 ## Components Breakdown
 
 1. X-Encoder (Video Encoder)
-    I used a frozen DINOv3 VIT-S model 
+    I used a frozen [DINOv3](https://arxiv.org/pdf/2508.10104) VIT-S model 
 2. QueryEmbedding (Used the embedding layers of `google/gemma-3-270m-it`)
 3. The predictor is also `google/gemma-1-270m-it` where I took the last 4 layers of the model
     The first and last layers without the embedding layer
@@ -18,5 +18,19 @@
 1. I assume the pretrained models already have a unique representation of the world
 2. Each model has a different internal representation 
 
-[x] I used projection layers to help map from one models representaion to the others' representation
-[x] This also comes in handy to map different model output dimentions [D] to each other 
+[x]- I used projection layers to help map from one models representaion to the others' representation
+[x]- This also comes in handy to map different model output dimentions [D] to each other
+
+
+# Dataset setup
+```sh
+mkdir -p ./msrvtt_videos
+
+# Download the full zip (~8-10 GB compressed)
+wget https://www.robots.ox.ac.uk/~maxbain/frozen-in-time/data/MSRVTT.zip -P ./msrvtt_videos/
+
+
+unzip ./msrvtt_videos/MSRVTT.zip -d ./msrvtt_videos/
+```
+
+
