@@ -13,14 +13,14 @@ logging.set_verbosity_error()
 train_ds = MSRVTTDataset(
     hf_dataset = load_dataset('friedrichor/MSR-VTT', 'train_9k')['train'],
     video_root_dir = "msrvtt_videos/MSRVTT/videos/all/",
-    num_frames=25
+    num_frames=15
 )
 
 train_ds.filter_valid_videos()
 print(f"Valid samples: {len(train_ds.valid_indices)} / {train_ds.original_len}")
 
-device = torch.device("mps" if torch.mps.is_available() else "cpu")
-
+device = torch.device( "cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu")
+print("Using device", device)
 
 model = VL_JEPA()
 model.to(device)
@@ -37,7 +37,7 @@ loader = DataLoader(train_ds, batch_size=16, collate_fn=collate_fn)
 
 CHECKPOINT_DIR = Path("checkpoints")
 CHECKPOINT_PATH = CHECKPOINT_DIR / "checkpoint.pth"
-NUM_EPOCHS = 50
+NUM_EPOCHS = 20
 
 
 def load_checkpoint_if_exists(model, optimizer, device):
