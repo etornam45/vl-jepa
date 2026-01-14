@@ -5,15 +5,15 @@ from datasets import load_dataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.utils import logging
-logging.set_verbosity_error()
-import os
 from pathlib import Path
+logging.set_verbosity_error()
+
 
 
 train_ds = MSRVTTDataset(
     hf_dataset = load_dataset('friedrichor/MSR-VTT', 'train_9k')['train'],
     video_root_dir = "msrvtt_videos/MSRVTT/videos/all/",
-    num_frames=8
+    num_frames=25
 )
 
 train_ds.filter_valid_videos()
@@ -32,7 +32,7 @@ print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
-loader = DataLoader(train_ds, batch_size=32, collate_fn=collate_fn)
+loader = DataLoader(train_ds, batch_size=16, collate_fn=collate_fn)
 
 
 CHECKPOINT_DIR = Path("checkpoints")
