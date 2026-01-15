@@ -160,14 +160,14 @@ class VL_JEPA(nn.Module):
         self.visual_dim = visual_dim
         self.max_seq_len = max_seq_len
 
-        self.xv_encoder = AutoModel.from_pretrained(v_enc_name, device_map="auto")
+        self.xv_encoder = AutoModel.from_pretrained(v_enc_name)
         self.freeze_model(self.xv_encoder)
 
         self.visual_proj = nn.Sequential(
             nn.Linear(visual_dim, predictor_dim), nn.GELU(), nn.LayerNorm(predictor_dim)
         )
 
-        self.y_encoder = AutoModel.from_pretrained(y_enc_name, device_map="auto")
+        self.y_encoder = AutoModel.from_pretrained(y_enc_name)
         self.freeze_model(self.y_encoder)
 
         self.query_tokenizer = AutoTokenizer.from_pretrained("google/gemma-3-270m-it")
