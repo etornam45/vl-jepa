@@ -15,6 +15,12 @@ class TextEmbedder(nn.Module):
         self.vocab_size = temp_model.config.vocab_size
         self.hidden_size = temp_model.config.hidden_size
         del temp_model  # NOTE: delete the model itself and keep the embedding layer
+      
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     def forward(self, input_ids):
         return self.embed_tokens(input_ids)
@@ -154,14 +160,14 @@ class VL_JEPA(nn.Module):
         self.visual_dim = visual_dim
         self.max_seq_len = max_seq_len
 
-        self.xv_encoder = AutoModel.from_pretrained(v_enc_name)
+        self.xv_encoder = AutoModel.from_pretrained(v_enc_name, device_map="auto")
         self.freeze_model(self.xv_encoder)
 
         self.visual_proj = nn.Sequential(
             nn.Linear(visual_dim, predictor_dim), nn.GELU(), nn.LayerNorm(predictor_dim)
         )
 
-        self.y_encoder = AutoModel.from_pretrained(y_enc_name)
+        self.y_encoder = AutoModel.from_pretrained(y_enc_name, device_map="auto")
         self.freeze_model(self.y_encoder)
 
         self.query_tokenizer = AutoTokenizer.from_pretrained("google/gemma-3-270m-it")
