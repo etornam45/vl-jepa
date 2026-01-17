@@ -39,6 +39,11 @@ class MSRVTTDataset(Dataset):
         return len(self.hf_dataset) * self.captions_per_video
 
     def __getitem__(self, idx):
+        # Handle slice objects for indexing like dataset[:50]
+        if isinstance(idx, slice):
+            start, stop, step = idx.indices(len(self))
+            return [self.__getitem__(i) for i in range(start, stop, step or 1)]
+        
         if hasattr(self, "valid_indices"):
             sample_idx = self.valid_indices[idx // self.captions_per_video]
         else:
