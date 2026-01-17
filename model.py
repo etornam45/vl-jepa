@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, AutoVideoProcessor
+# from torchcodec.decoders import VideoDecoder
 import torch.nn.functional as F
+import numpy as np
 
 
 class TextEmbedder(nn.Module):
@@ -34,7 +36,7 @@ class Predictor(nn.Module):
             trust_remote_code=True,
         )
         self.model.layers = nn.ModuleList(self.model.layers[-num_layers:])
-        self.partial_freeze()
+        # self.partial_freeze()
 
         self.query_token = nn.Parameter(
             torch.randn(1, 1, self.model.config.hidden_size)
@@ -90,9 +92,7 @@ class Predictor(nn.Module):
 class InfoNCELoss(nn.Module):
     """
     InfoNCE (NT-Xent) loss for contrastive learning
-    NOTE: I did not implement this function by myself it may be wrong.
     """
-
     def __init__(self, temperature=0.07, learnable_temperature=True):
         super().__init__()
         if learnable_temperature:
@@ -106,8 +106,6 @@ class InfoNCELoss(nn.Module):
         Compute InfoNCE loss between two sets of embeddings
         z_i: [B, D] - anchor embeddings (predicted)
         z_j: [B, D] - positive embeddings (target)
-
-        Returns: scalar loss
         """
         batch_size = z_i.shape[0]
 
@@ -116,7 +114,6 @@ class InfoNCELoss(nn.Module):
         z_j_norm = F.normalize(z_j, dim=-1)
 
         # Compute similarity matrix
-        # [B, D] @ [D, B] = [B, B]
         sim_matrix = torch.matmul(z_i_norm, z_j_norm.T)  # [B, B]
 
         # Scale by temperature
@@ -144,51 +141,66 @@ class InfoNCELoss(nn.Module):
 class VL_JEPA(nn.Module):
     def __init__(
         self,
-        v_enc_name="facebook/dinov3-vits16-pretrain-lvd1689m",
-        visual_dim=384,
+        v_enc_name="facebook/vjepa2-vitl-fpc64-256",
         predictor_dim=640,
         text_dim=768,
         max_seq_len=512,
         temperature=0.07,
         learnable_temperature=True,
         y_enc_name="google/embeddinggemma-300m",
+        num_frames=64,  # V-JEPA expects 64 frames
+        frame_size=224,  # Input frame size for V-JEPA
     ):
         super().__init__()
         # Configurations
         self.predictor_dim = predictor_dim
         self.text_dim = text_dim
-        self.visual_dim = visual_dim
         self.max_seq_len = max_seq_len
+        self.num_frames = num_frames
+        self.frame_size = frame_size
 
-        self.xv_encoder = AutoModel.from_pretrained(v_enc_name)
+        # V-JEPA video encoder
+        self.video_processor = AutoVideoProcessor.from_pretrained(v_enc_name)
+        self.xv_encoder = AutoModel.from_pretrained(
+            v_enc_name,
+            trust_remote_code=True,
+        )
         self.freeze_model(self.xv_encoder)
-
+        
+        # Get visual dimension from V-JEPA config
+        self.visual_dim = self.xv_encoder.config.hidden_size
+        
         self.visual_proj = nn.Sequential(
-            nn.Linear(visual_dim, predictor_dim), nn.GELU(), nn.LayerNorm(predictor_dim)
+            nn.Linear(self.visual_dim, predictor_dim), 
+            nn.GELU(), 
+            nn.LayerNorm(predictor_dim)
         )
 
+        # Text encoder for targets
         self.y_encoder = AutoModel.from_pretrained(y_enc_name)
         self.freeze_model(self.y_encoder)
 
+        # Query tokenizer and embedder
         self.query_tokenizer = AutoTokenizer.from_pretrained("google/gemma-3-270m-it")
         if self.query_tokenizer.pad_token is None:
-            self.query_tokenizer.pad_token = (
-                self.query_tokenizer.eos_token
-            )  # ADD PAD TOKEN
+            self.query_tokenizer.pad_token = self.query_tokenizer.eos_token
 
         self.text_proj = nn.Sequential(
-            nn.Linear(text_dim, predictor_dim), nn.GELU(), nn.LayerNorm(predictor_dim)
+            nn.Linear(text_dim, predictor_dim), 
+            nn.GELU(), 
+            nn.LayerNorm(predictor_dim)
         )
 
         self.query_embedder = TextEmbedder()
-
         self.predictor = Predictor()
 
-        # Positional embeddings and temperature for contrastive learning
+        # Positional embeddings
         self.pos_embed = nn.Parameter(torch.randn(1, max_seq_len, predictor_dim))
 
+        # Loss function
         self.loss_fn = InfoNCELoss(
-            temperature=temperature, learnable_temperature=learnable_temperature
+            temperature=temperature, 
+            learnable_temperature=learnable_temperature
         )
 
     def freeze_model(self, model):
@@ -227,13 +239,58 @@ class VL_JEPA(nn.Module):
         return sy
 
     def embed_visual(self, video_frames):
-        # video_frames: Tensor of shape [B, N_frames, C, H, W]
+        """
+        Embed video frames using V-JEPA encoder.
+        video_frames: Tensor of shape [B, N_frames, C, H, W]
+        Returns: Tensor of shape [B, N_frames, D_visual]
+        """
         B, N, C, H, W = video_frames.shape
-        video_frames = video_frames.view(B * N, C, H, W)
-        with torch.no_grad():
-            sv = self.xv_encoder(video_frames).last_hidden_state  # [B*N, S_v, D_v]
-            sv = sv.mean(dim=1)  # Global average pooling over sequence dimension
-            sv = sv.view(B, N, -1)  # [B, N, D_v]
+        
+        # Ensure we have the right number of frames for V-JEPA
+        if N != self.num_frames:
+            # Resample frames if needed
+            indices = torch.linspace(0, N-1, self.num_frames).long()
+            video_frames = video_frames[:, indices]
+            N = self.num_frames
+        
+        # Process each video in the batch
+        all_visual_features = []
+        for i in range(B):
+            # Get single video [N, C, H, W]
+            single_video = video_frames[i]
+            
+            # Process with V-JEPA video processor
+            processed_video = self.video_processor(
+                single_video.numpy() if isinstance(single_video, torch.Tensor) else single_video,
+                return_tensors="pt"
+            ).to(self.pos_embed.device)
+            
+            # Get V-JEPA encoder outputs
+            with torch.no_grad():
+                outputs = self.xv_encoder(**processed_video)
+                encoder_outputs = outputs.last_hidden_state
+                
+                # Get vision features (use predictor outputs for better representations)
+                if hasattr(outputs, 'predictor_output'):
+                    visual_features = outputs.predictor_output.last_hidden_state
+                else:
+                    visual_features = encoder_outputs
+                
+                # Average over spatial dimensions to get per-frame features
+                # V-JEPA outputs might be [1, T, N_patches, D] or [1, T*N_patches, D]
+                if len(visual_features.shape) == 4:
+                    # [1, T, N_patches, D] -> average over patches
+                    visual_features = visual_features.mean(dim=2)  # [1, T, D]
+                elif len(visual_features.shape) == 3:
+                    # [1, T*N_patches, D] -> reshape and average
+                    T = self.num_frames
+                    N_patches = visual_features.shape[1] // T
+                    visual_features = visual_features.view(1, T, N_patches, -1).mean(dim=2)
+                
+                all_visual_features.append(visual_features.squeeze(0))
+        
+        # Stack all batch elements
+        sv = torch.stack(all_visual_features, dim=0)  # [B, T, D_visual]
         return sv
 
     def forward(self, xv, xq, y):
@@ -242,47 +299,70 @@ class VL_JEPA(nn.Module):
         xq: List of strings [B]
         y: List of strings [B]
         """
-
-        sv = self.embed_visual(xv)  # [B, N, D_v]
-        sv = self.visual_proj(sv)  # [B, N, D_p]
+        # Encode visual inputs with V-JEPA
+        sv = self.embed_visual(xv)  # [B, N_frames, D_visual]
+        sv = self.visual_proj(sv)  # [B, N_frames, D_p]
+        
+        # Encode query text
         sq = self.embed_query(xq)  # [B, S_q, D_p]
 
-        sp = self.predictor(sq, sv, pos_embed=self.pos_embed)  # [B, S_q + N + 2, D_p]
+        # Predictor forward pass
+        sp = self.predictor(sq, sv, pos_embed=self.pos_embed)  # [B, S_q + N_frames + 2, D_p]
 
+        # Encode target text
         sy = self.encode_target(y)  # [B, S_y, D_t]
         sy = self.text_proj(sy)  # [B, S_y, D_p]
 
-        # Use mean pooling for both
+        # Mean pooling for contrastive learning
         sp_pooled = sp.mean(dim=1)  # [B, D_p]
         sy_pooled = sy.mean(dim=1)  # [B, D_p]
 
+        # Compute contrastive loss
         loss, accuracy = self.loss_fn(z_i=sp_pooled, z_j=sy_pooled)
         return loss, accuracy
 
     def predict(self, xv, xq):
-        sv = self.embed_visual(xv)  # [B, N, D_v]
-        sv = self.visual_proj(sv)  # [B, N, D_p]
-        sq = self.embed_query(xq)  # [B, S_q, D_p]
-
-        sp = self.predictor(sq, sv, pos_embed=self.pos_embed)  # [B, S_q + N + 2, D_p]
+        """Generate predictions for given video and query."""
+        sv = self.embed_visual(xv)
+        sv = self.visual_proj(sv)
+        sq = self.embed_query(xq)
+        
+        sp = self.predictor(sq, sv, pos_embed=self.pos_embed)
         return sp
 
 
 if __name__ == "__main__":
-    model = VL_JEPA()
+    # Test with V-JEPA
+    model = VL_JEPA(
+        v_enc_name="facebook/vjepa2-vitl-fpc64-256",
+        predictor_dim=1024,  # Match V-JEPA hidden size
+    )
+    
     device = torch.device("mps" if torch.mps.is_available() else "cpu")
     model.to(device)
+    
+    print("Model Architecture:")
     print(model)
+    
     total_params = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-    print(trainable, total_params)
-    print("Percentage trainable", (trainable / total_params) * 100, "%")
-
-    xv = torch.randn(2, 4, 3, 224, 224)  # Example video input
-    xq = ["This is a sample query."] * 2  # Example text
-    y = ["This is a sample target."] * 2  # Example target text
-    xv, xq, y = xv.to(device), xq, y
+    
+    print(f"\nTotal parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable:,}")
+    print(f"Percentage trainable: {(trainable / total_params) * 100:.2f}%")
+    
+    # Test forward pass
+    batch_size = 2
+    num_frames = 64  # V-JEPA expects 64 frames
+    xv = torch.randn(batch_size, num_frames, 3, 224, 224).to(device)
+    xq = ["What is happening in this video?"] * batch_size
+    y = ["A person is performing an action."] * batch_size
+    
+    print("Input shapes:")
+    print(f"Video: {xv.shape}")
+    print(f"Query: {len(xq)} samples")
+    print(f"Target: {len(y)} samples")
+    
     loss, accuracy = model(xv, xq, y)
-    print("Loss:", loss.item())
-    print("Accuracy:", accuracy.item())
+    print(f"\nLoss: {loss.item():.4f}")
+    print(f"Accuracy: {accuracy.item():.4f}")
